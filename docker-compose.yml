@@ -1,0 +1,114 @@
+services:
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-carousel_mvp}
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+    ports:
+      - "5432:5432"
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${S3_ACCESS_KEY:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${S3_SECRET_KEY:-minioadmin}
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio_data:/data
+
+  minio-init:
+    image: minio/mc:latest
+    depends_on:
+      - minio
+    environment:
+      MINIO_ROOT_USER: ${S3_ACCESS_KEY:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${S3_SECRET_KEY:-minioadmin}
+      S3_BUCKET_ASSETS: ${S3_BUCKET_ASSETS:-carousel-assets}
+      S3_BUCKET_EXPORTS: ${S3_BUCKET_EXPORTS:-carousel-exports}
+    entrypoint: >
+      /bin/sh -c "
+      sleep 5 &&
+      mc alias set local http://minio:9000 $$MINIO_ROOT_USER $$MINIO_ROOT_PASSWORD &&
+      mc mb -p local/$$S3_BUCKET_ASSETS || true &&
+      mc mb -p local/$$S3_BUCKET_EXPORTS || true &&
+      mc anonymous set download local/$$S3_BUCKET_EXPORTS || true &&
+      exit 0
+      "
+
+  api:
+    build:
+      context: ./backend
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-postgresql+asyncpg://postgres:postgres@db:5432/carousel_mvp}
+      FRONTEND_ORIGIN: ${FRONTEND_ORIGIN:-http://localhost:3000}
+      FRONTEND_ASSET_BASE_URL: ${FRONTEND_ASSET_BASE_URL:-http://web:3000}
+      AUTO_CREATE_DB: ${AUTO_CREATE_DB:-true}
+      S3_ENDPOINT_URL: ${S3_ENDPOINT_URL:-http://minio:9000}
+      S3_PUBLIC_ENDPOINT_URL: ${S3_PUBLIC_ENDPOINT_URL:-http://localhost:9000}
+      S3_ACCESS_KEY: ${S3_ACCESS_KEY:-minioadmin}
+      S3_SECRET_KEY: ${S3_SECRET_KEY:-minioadmin}
+      S3_BUCKET_ASSETS: ${S3_BUCKET_ASSETS:-carousel-assets}
+      S3_BUCKET_EXPORTS: ${S3_BUCKET_EXPORTS:-carousel-exports}
+      LLM_BASE_URL: ${LLM_BASE_URL:-https://api.openai.com/v1}
+      LLM_API_KEY: ${LLM_API_KEY:-}
+      LLM_MODEL: ${LLM_MODEL:-gpt-4o-mini}
+    depends_on:
+      - db
+      - minio
+      - minio-init
+    ports:
+      - "8000:8000"
+    command: >
+      /bin/sh -c "
+      until python -c 'import socket; s=socket.create_connection((\"db\", 5432), 2); s.close()'; do sleep 1; done &&
+      alembic upgrade head &&
+      uvicorn app.main:app --host 0.0.0.0 --port 8000
+      "
+
+  worker:
+    build:
+      context: ./backend
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-postgresql+asyncpg://postgres:postgres@db:5432/carousel_mvp}
+      FRONTEND_ASSET_BASE_URL: ${FRONTEND_ASSET_BASE_URL:-http://web:3000}
+      S3_ENDPOINT_URL: ${S3_ENDPOINT_URL:-http://minio:9000}
+      S3_PUBLIC_ENDPOINT_URL: ${S3_PUBLIC_ENDPOINT_URL:-http://localhost:9000}
+      S3_ACCESS_KEY: ${S3_ACCESS_KEY:-minioadmin}
+      S3_SECRET_KEY: ${S3_SECRET_KEY:-minioadmin}
+      S3_BUCKET_ASSETS: ${S3_BUCKET_ASSETS:-carousel-assets}
+      S3_BUCKET_EXPORTS: ${S3_BUCKET_EXPORTS:-carousel-exports}
+      LLM_BASE_URL: ${LLM_BASE_URL:-https://api.openai.com/v1}
+      LLM_API_KEY: ${LLM_API_KEY:-}
+      LLM_MODEL: ${LLM_MODEL:-gpt-4o-mini}
+      WORKER_POLL_INTERVAL_SECONDS: ${WORKER_POLL_INTERVAL_SECONDS:-3}
+    depends_on:
+      - db
+      - minio
+      - minio-init
+      - api
+    command: >
+      /bin/sh -c "
+      until python -c 'import socket; s=socket.create_connection((\"db\", 5432), 2); s.close()'; do sleep 1; done &&
+      alembic upgrade head &&
+      python -m app.workers.worker
+      "
+
+  web:
+    build:
+      context: ./web
+    environment:
+      NUXT_PUBLIC_API_BASE: ${NUXT_PUBLIC_API_BASE:-http://localhost:8000/api}
+    depends_on:
+      - api
+    ports:
+      - "3000:3000"
+
+volumes:
+  pg_data:
+  minio_data:
