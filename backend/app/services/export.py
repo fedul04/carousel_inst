@@ -7,7 +7,7 @@ from tempfile import TemporaryDirectory
 from zipfile import ZIP_DEFLATED, ZipFile
 
 from fastapi import BackgroundTasks
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
@@ -50,6 +50,18 @@ class ExportService:
 
     async def process_job(self, job_id: str) -> None:
         async with SessionLocal() as session:
+            claimed = await session.scalar(
+                update(ExportJob)
+                .where(ExportJob.id == job_id, ExportJob.status == "queued")
+                .values(status="running", started_at=datetime.utcnow())
+                .returning(ExportJob.id)
+            )
+            if not claimed:
+                # Job is already being/has been processed by another runner.
+                await session.rollback()
+                return
+            await session.commit()
+
             job = await session.get(ExportJob, job_id)
             if not job:
                 return
@@ -62,10 +74,6 @@ class ExportService:
                 return
 
             try:
-                job.status = "running"
-                job.started_at = datetime.utcnow()
-                await session.commit()
-
                 slides = (
                     await session.scalars(
                         select(Slide)

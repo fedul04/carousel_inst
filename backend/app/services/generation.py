@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 
 from fastapi import BackgroundTasks
-from sqlalchemy import delete, select
+from sqlalchemy import delete, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
@@ -44,6 +44,18 @@ class GenerationService:
 
     async def process_job(self, job_id: str) -> None:
         async with SessionLocal() as session:
+            claimed = await session.scalar(
+                update(GenerationJob)
+                .where(GenerationJob.id == job_id, GenerationJob.status == "queued")
+                .values(status="running", started_at=datetime.utcnow())
+                .returning(GenerationJob.id)
+            )
+            if not claimed:
+                # Job is already being/has been processed by another runner.
+                await session.rollback()
+                return
+            await session.commit()
+
             job = await session.get(GenerationJob, job_id)
             if not job:
                 return
@@ -56,10 +68,6 @@ class GenerationService:
                 return
 
             try:
-                job.status = "running"
-                job.started_at = datetime.utcnow()
-                await session.commit()
-
                 prepared_payload = await source_ingest_service.prepare_payload(
                     source_type=carousel.source_type,
                     source_payload=carousel.source_payload,
