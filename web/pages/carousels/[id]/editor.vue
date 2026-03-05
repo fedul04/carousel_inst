@@ -125,13 +125,7 @@ const designState = reactive<DesignState>(
   }),
 )
 
-const basePhotoItems: Array<{ id: string; url: string }> = [
-  { id: "figma-1", url: "/figma_refs/fb8c5a6efbbc99461884b01e0c0d9c0b25278045.jpg" },
-  { id: "figma-2", url: "/figma_refs/09a288417744927a5d1e6901a3c4c518009c968d.png" },
-  { id: "figma-3", url: "/figma_refs/b83b9f51cfeda5c7c271d9e2b0ddce2fa7284de6.png" },
-  { id: "figma-4", url: "/figma_refs/d97e2f06663a9e5e7371b9ac39584b34c431f440.png" },
-  { id: "figma-5", url: "/figma_refs/a8c04599225cc08f5f53201e2214775ab0501d03.png" },
-]
+const basePhotoItems: Array<{ id: string; url: string }> = []
 
 const photoItems = ref<Array<{ id: string; url: string }>>([...basePhotoItems])
 

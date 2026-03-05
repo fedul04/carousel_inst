@@ -20,3 +20,9 @@ Thumbs.db
 # Env
 .env
 
+# Local design sources (do not publish)
+from_figma/
+web/public/figma_refs/
+Shablon.fig
+figma_embed_full.png
+tz_testovoe.txt
