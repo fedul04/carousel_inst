@@ -219,6 +219,7 @@ const normalizeSlideAssetUrls = (slideItems: SlideItem[]): SlideItem[] =>
 
 const exportJob = ref<ExportJob | null>(null)
 const exportPolling = ref<number | null>(null)
+const autoDownloadAfterExport = ref(false)
 
 const selectedSlide = computed(() =>
   slides.value.find((slide) => slide.id === selectedSlideId.value),
@@ -512,22 +513,120 @@ const stopExportPolling = () => {
   }
 }
 
+const exportInProgress = computed(
+  () => exportJob.value?.status === "queued" || exportJob.value?.status === "running",
+)
+
+const canDownloadExport = computed(
+  () => exportJob.value?.status === "done" && Boolean(exportJob.value.download_url),
+)
+
+const normalizeDownloadUrl = (url: string) => {
+  try {
+    const parsed = new URL(url)
+    const apiBaseRaw = String(config.public.apiBase || "http://localhost:8000/api")
+    const apiBase = new URL(apiBaseRaw)
+    if (
+      parsed.hostname === "host.docker.internal" ||
+      parsed.hostname === "api" ||
+      parsed.hostname === "web"
+    ) {
+      parsed.protocol = apiBase.protocol
+      parsed.host = apiBase.host
+    }
+    return parsed.toString()
+  } catch {
+    return url
+  }
+}
+
+const normalizeExportJob = (job: ExportJob): ExportJob => ({
+  ...job,
+  download_url: job.download_url ? normalizeDownloadUrl(job.download_url) : null,
+})
+
+const parseFileNameFromDisposition = (value: string | null) => {
+  if (!value) return null
+  const utfMatch = /filename\*=UTF-8''([^;]+)/i.exec(value)
+  if (utfMatch?.[1]) {
+    try {
+      return decodeURIComponent(utfMatch[1])
+    } catch {
+      return utfMatch[1]
+    }
+  }
+  const plainMatch = /filename="?([^"]+)"?/i.exec(value)
+  return plainMatch?.[1] || null
+}
+
+const downloadExport = async () => {
+  const url = exportJob.value?.download_url
+  if (!url) return
+  const normalizedUrl = normalizeDownloadUrl(url)
+  try {
+    const response = await fetch(normalizedUrl)
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}`)
+    }
+    const blob = await response.blob()
+    const filename =
+      parseFileNameFromDisposition(response.headers.get("content-disposition")) ||
+      `carousel_${carouselId.value}.zip`
+    const objectUrl = URL.createObjectURL(blob)
+    const anchor = document.createElement("a")
+    anchor.href = objectUrl
+    anchor.download = filename
+    document.body.appendChild(anchor)
+    anchor.click()
+    anchor.remove()
+    URL.revokeObjectURL(objectUrl)
+    saveInfo.value = "ZIP скачан"
+  } catch (error: any) {
+    // Fallback: navigate directly to download endpoint.
+    window.location.href = normalizedUrl
+    saveInfo.value = error?.message
+      ? `Пытаемся скачать напрямую: ${error.message}`
+      : "Пытаемся скачать напрямую"
+  }
+}
+
 const pollExport = (jobId: string) => {
   stopExportPolling()
   exportPolling.value = window.setInterval(async () => {
-    const job = await api.get<ExportJob>(`/exports/${jobId}`)
-    exportJob.value = job
-    if (job.status === "done" || job.status === "failed") {
+    try {
+      const job = normalizeExportJob(await api.get<ExportJob>(`/exports/${jobId}`))
+      exportJob.value = job
+      if (job.status === "done" || job.status === "failed") {
+        stopExportPolling()
+      }
+      if (job.status === "done" && job.download_url) {
+        saveInfo.value = "Экспорт готов"
+        if (autoDownloadAfterExport.value) {
+          autoDownloadAfterExport.value = false
+          await downloadExport()
+        }
+      }
+      if (job.status === "failed") {
+        autoDownloadAfterExport.value = false
+        errorText.value = job.error || "Экспорт завершился с ошибкой"
+      }
+    } catch (error: any) {
       stopExportPolling()
+      autoDownloadAfterExport.value = false
+      errorText.value = error?.data?.detail ?? error?.message ?? "Ошибка проверки статуса экспорта"
     }
   }, 1500)
 }
 
 const runExport = async () => {
-  exportJob.value = await api.post<ExportJob>("/exports", {
+  if (exportInProgress.value) return
+  saveInfo.value = "Экспорт запущен..."
+  errorText.value = ""
+  autoDownloadAfterExport.value = true
+  exportJob.value = normalizeExportJob(await api.post<ExportJob>("/exports", {
     carousel_id: carouselId.value,
     format: "png",
-  })
+  }))
   pollExport(exportJob.value.id)
 }
 
@@ -544,8 +643,16 @@ onBeforeUnmount(stopExportPolling)
       </div>
       <div class="actions-row">
         <NuxtLink class="btn btn-secondary" to="/carousels">Назад</NuxtLink>
-        <button class="btn btn-primary" :disabled="loading" @click="runExport">
-          Экспорт ZIP
+        <button
+          v-if="canDownloadExport"
+          class="btn btn-secondary"
+          :disabled="loading"
+          @click="downloadExport"
+        >
+          Скачать ZIP
+        </button>
+        <button class="btn btn-primary" :disabled="loading || exportInProgress" @click="runExport">
+          {{ exportInProgress ? "Экспортируется..." : "Экспорт ZIP" }}
         </button>
       </div>
     </header>
@@ -838,8 +945,8 @@ onBeforeUnmount(stopExportPolling)
           <a
             v-if="exportJob.download_url"
             class="btn btn-primary"
-            :href="exportJob.download_url"
-            target="_blank"
+            href="#"
+            @click.prevent="downloadExport"
           >
             Скачать ZIP
           </a>
